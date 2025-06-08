@@ -1,8 +1,11 @@
 @import "tailwindcss";
-
+@tailwind utilities;
 @plugin "tailwindcss-animate";
 
 @custom-variant dark (&:is(.dark *));
+
+
+
 
 @theme {
   --color-success-100: #49de50;
