@@ -3,7 +3,7 @@ import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyAqT71vVGVqL0MA89v5wO9TG3cMt-5fLbg",
+  apiKey: process.env.FIREBASE_API_KEY,
   authDomain: "aceme-ce585.firebaseapp.com",
   projectId: "aceme-ce585",
   storageBucket: "aceme-ce585.firebasestorage.app",
