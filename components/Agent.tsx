@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { useRouter } from "next/navigation";
 import { vapi } from "@/lib/vapi.sdk";
 import { useEffect } from "react";
+import { interviewer } from "@/constants";
 
 enum CallStatus {
   INACTIVE = "INACTIVE",
@@ -30,20 +31,20 @@ interface AgentProps {
   userName: string;
   userId: string;
   type: string;
+  interviewId?: string; // Optional for interview mode
   questions?: string[]; // Optional for interview mode
-  interviewer?: any; // Optional interviewer config
   provider?: string; // Add provider option
   model?: string; // Add model option
 }
 
-const Agent = ({ 
-  userName, 
-  userId, 
-  type, 
-  questions, 
-  interviewer,
+const Agent = ({
+  userName,
+  userId,
+  type,
+  interviewId,
+  questions,
   provider = "deepseek",
-  model = "deepseek-v3" 
+  model = "deepseek-v3",
 }: AgentProps) => {
   const router = useRouter();
 
@@ -117,15 +118,15 @@ const Agent = ({
       console.error("- Error keys:", Object.keys(error || {}));
       console.error("- Error message:", error?.message || "No message");
       console.error("- Error stack:", error?.stack || "No stack");
-      
+
       // Handle VAPI specific error format
       let errorMessage = "Unknown error occurred";
-      
-      if (typeof error === 'string') {
+
+      if (typeof error === "string") {
         errorMessage = error;
-      } else if (error && typeof error === 'object') {
+      } else if (error && typeof error === "object") {
         // Handle VAPI error format with data/error keys
-        if (error.error && typeof error.error === 'string') {
+        if (error.error && typeof error.error === "string") {
           errorMessage = error.error;
         } else if (error.data && error.data.message) {
           errorMessage = error.data.message;
@@ -133,14 +134,15 @@ const Agent = ({
           errorMessage = error.message;
         } else if (error.statusCode) {
           errorMessage = `API Error (${error.statusCode})`;
-          
+
           // Common VAPI status codes
           switch (error.statusCode) {
             case 401:
               errorMessage += ": Invalid API key or unauthorized access";
               break;
             case 400:
-              errorMessage += ": Bad request - check your workflow ID and parameters";
+              errorMessage +=
+                ": Bad request - check your workflow ID and parameters";
               break;
             case 404:
               errorMessage += ": Workflow not found - check your workflow ID";
@@ -182,9 +184,32 @@ const Agent = ({
     };
   }, []);
 
+  // TODO: Implement feedback generation logic
+  const handleGenerateFeedback = async (messages: SavedMessage[]) => {
+    console.log("Generating feedback with messages:", messages);
+    const { success, id } = {
+      success: true,
+      id: "feedback-id-123", // Mocked feedback ID for demonstration
+    };
+
+    if (success && id) {
+      console.log("Feedback generated successfully with ID:", id);
+      router.push(`/interview/${interviewId}/feedback`);
+    } else {
+      console.error("Failed to generate feedback");
+      setError("Failed to generate feedback");
+      router.push(`/interview/${interviewId}`);
+    }
+  };
+
   useEffect(() => {
     if (callStatus === CallStatus.FINISHED) {
-      router.push("/");
+      if (type === "generate") {
+        console.log("Call finished - redirecting to interview page");
+        router.push(`/interview/${interviewId}`);
+      } else {
+        handleGenerateFeedback(messages);
+      }
     }
   }, [messages, callStatus, type, userId, router]);
 
@@ -217,7 +242,9 @@ const Agent = ({
       if (type === "generate") {
         // Validate environment variables for workflow
         if (!process.env.NEXT_PUBLIC_VAPI_WORKFLOW_ID) {
-          throw new Error("NEXT_PUBLIC_VAPI_WORKFLOW_ID is not defined in environment variables");
+          throw new Error(
+            "NEXT_PUBLIC_VAPI_WORKFLOW_ID is not defined in environment variables"
+          );
         }
 
         // Use workflow mode - explicitly pass undefined for assistant
@@ -230,7 +257,7 @@ const Agent = ({
             variableValues: {
               username: userName,
               userid: userId,
-            }
+            },
           }
         );
 
@@ -244,26 +271,23 @@ const Agent = ({
             .join("\n");
         }
 
-        if (!interviewer) {
-          throw new Error("Interviewer configuration is required for non-generate mode");
-        }
-
-        const result = await vapi.start(interviewer, {
-          variableValues: {
-            questions: formattedQuestions,
+        await vapi.start(
+          interviewer, // assistant
+          {
+            variableValues: {
+              questions: formattedQuestions,
+            },
           }
-        });
-
-        console.log("VAPI start result (assistant mode):", result);
+        );
       }
-
     } catch (error: any) {
       console.error("Failed to start call - detailed error:");
       console.error("- Error:", error);
       console.error("- Error message:", error?.message);
       console.error("- Error stack:", error?.stack);
-      
-      const errorMessage = error?.message || error?.toString() || "Unknown error starting call";
+
+      const errorMessage =
+        error?.message || error?.toString() || "Unknown error starting call";
       setError(errorMessage);
       setCallStatus(CallStatus.INACTIVE);
     }
@@ -273,7 +297,7 @@ const Agent = ({
     try {
       console.log("Disconnecting call");
       setCallStatus(CallStatus.FINISHED);
-      
+
       if (vapi && typeof vapi.stop === "function") {
         vapi.stop();
       }
@@ -328,9 +352,15 @@ const Agent = ({
 
       {/* Call Status Debug Info */}
       <div className="debug-info mb-4 p-2 bg-gray-100 rounded text-sm">
-        <p><strong>Call Status:</strong> {callStatus}</p>
-        <p><strong>Messages Count:</strong> {messages.length}</p>
-        <p><strong>Is Speaking:</strong> {isSpeaking ? 'Yes' : 'No'}</p>
+        <p>
+          <strong>Call Status:</strong> {callStatus}
+        </p>
+        <p>
+          <strong>Messages Count:</strong> {messages.length}
+        </p>
+        <p>
+          <strong>Is Speaking:</strong> {isSpeaking ? "Yes" : "No"}
+        </p>
       </div>
 
       {messages.length > 0 && (

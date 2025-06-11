@@ -1,5 +1,5 @@
 import Agent from "@/components/Agent";
-import { getCurrentUser, getInterviewsByUserId } from "@/lib/actions/auth.action";
+import { getCurrentUser } from "@/lib/actions/auth.action";
 import EnvCheck from "@/components/EnvCheck";
 import React from "react";
 

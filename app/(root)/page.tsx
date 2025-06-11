@@ -4,22 +4,21 @@ import Link from "next/link";
 import Image from "next/image";
 import { dummyInterviews } from "@/constants";
 import InterviewCard from "@/components/InterviewCard";
+import { getCurrentUser } from "@/lib/actions/auth.action";
 import {
-  getCurrentUser,
   getInterviewsByUserId,
   getLatestInterviews,
-} from "@/lib/actions/auth.action";
+} from "@/lib/actions/general.action";
 
 const page = async () => {
   const user = await getCurrentUser();
-  const [userInterviews,latestInterviews] = await Promise.all([
-    await getInterviewsByUserId(user?.id!),await getLatestInterviews({userId : user?.id!}),
-  ])
-
+  const [userInterviews, latestInterviews] = await Promise.all([
+    await getInterviewsByUserId(user?.id!),
+    await getLatestInterviews({ userId: user?.id! }),
+  ]);
 
   const hasPastInterviews = userInterviews && userInterviews.length > 0;
   const hasUpcomingInterviews = latestInterviews && latestInterviews.length > 0;
-
 
   return (
     <>
