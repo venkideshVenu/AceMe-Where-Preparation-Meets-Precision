@@ -21,7 +21,7 @@ const EnvCheck = () => {
   }, []);
 
   return (
-    <div className="p-4 bg-gray-100 rounded mb-4">
+    <div className="p-4 rounded mb-4">
       <h4 className="font-bold mb-2">Environment Status</h4>
       <div className="space-y-2 text-sm">
         <div>

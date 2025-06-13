@@ -1,12 +1,11 @@
 "use client";
 
-import React from "react";
+import React, { useState, useEffect, useRef } from "react";
 import Image from "next/image";
 import { cn } from "@/lib/utils";
 import { useRouter } from "next/navigation";
-import { vapi } from "@/lib/vapi.sdk";
-import { useEffect } from "react";
-import { interviewer } from "@/constants";
+import { io, Socket } from "socket.io-client";
+import { createFeedback } from "@/lib/actions/general.action";
 
 enum CallStatus {
   INACTIVE = "INACTIVE",
@@ -15,298 +14,418 @@ enum CallStatus {
   FINISHED = "FINISHED",
 }
 
-interface SavedMessage {
+interface TranscriptMessage {
   role: "user" | "assistant" | "system";
   content: string;
+  timestamp?: Date;
 }
 
-interface VapiMessage {
+interface AgentMessage {
   type: string;
-  transcriptType?: string;
-  role?: "user" | "assistant" | "system";
-  transcript?: string;
+  text: string;
+  timestamp: Date;
 }
 
 interface AgentProps {
   userName: string;
   userId: string;
   type: string;
-  interviewId?: string; // Optional for interview mode
-  questions?: string[]; // Optional for interview mode
-  provider?: string; // Add provider option
-  model?: string; // Add model option
+  interviewId?: string;
+  questions?: string[];
+  role?: string;
+  level?: string;
+  techStack?: string;
+  focus?: string;
 }
 
-const Agent = ({
+const LocalVoiceAgent: React.FC<AgentProps> = ({
   userName,
   userId,
   type,
   interviewId,
-  questions,
-  provider = "deepseek",
-  model = "deepseek-v3",
-}: AgentProps) => {
+  questions = [],
+  role,
+  level,
+  techStack,
+  focus,
+}) => {
   const router = useRouter();
+  const socketRef = useRef<Socket | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const speechSynthesisRef = useRef<SpeechSynthesisUtterance | null>(null);
 
-  const [isSpeaking, setIsSpeaking] = React.useState(false);
-  const [callStatus, setCallStatus] = React.useState<CallStatus>(
-    CallStatus.INACTIVE
-  );
-  const [messages, setMessages] = React.useState<SavedMessage[]>([]);
-  const [error, setError] = React.useState<string | null>(null);
+  // Add this to prevent hydration mismatch
+  const [isBrowser, setIsBrowser] = useState(false);
 
-  // Debug function to check VAPI configuration
-  const debugVapiConfig = () => {
-    console.log("VAPI Debug Info:");
-    console.log("- VAPI object:", vapi);
-    console.log("- Workflow ID:", process.env.NEXT_PUBLIC_VAPI_WORKFLOW_ID);
-    console.log("- VAPI methods:", Object.keys(vapi || {}));
-    console.log("- User info:", { userName, userId, type });
-  };
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [callStatus, setCallStatus] = useState<CallStatus>(CallStatus.INACTIVE);
+  const [transcript, setTranscript] = useState<TranscriptMessage[]>([]);
+  const [currentMessage, setCurrentMessage] = useState<string>("");
+  const [error, setError] = useState<string | null>(null);
+  const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [selectedVoice, setSelectedVoice] =
+    useState<SpeechSynthesisVoice | null>(null);
 
+  // Set isBrowser to true after first render (client-side only)
   useEffect(() => {
-    // Debug VAPI configuration on component mount
-    debugVapiConfig();
+    setIsBrowser(true);
+  }, []);
 
-    const onCallStart = () => {
-      console.log("Call started successfully");
-      setCallStatus(CallStatus.ACTIVE);
+  // Initialize Web Speech API - but only after confirming we're on the client
+  useEffect(() => {
+    if (!isBrowser) return;
+
+    if (window.speechSynthesis) {
+      // Get available voices
+      const loadVoices = () => {
+        const availableVoices = window.speechSynthesis.getVoices();
+        setVoices(availableVoices);
+
+        // Choose an English voice by default (preferring female voices)
+        const englishVoices = availableVoices.filter((voice) =>
+          voice.lang.includes("en")
+        );
+
+        // Look for common female voices
+        const preferredVoiceNames = [
+          "Samantha",
+          "Google UK English Female",
+          "Microsoft Zira",
+        ];
+        let preferredVoice = null;
+
+        for (const name of preferredVoiceNames) {
+          preferredVoice = englishVoices.find((voice) =>
+            voice.name.includes(name)
+          );
+          if (preferredVoice) break;
+        }
+
+        setSelectedVoice(
+          preferredVoice || englishVoices[0] || availableVoices[0]
+        );
+      };
+
+      // Initial load
+      loadVoices();
+
+      // Voices are loaded asynchronously
+      window.speechSynthesis.onvoiceschanged = loadVoices;
+
+      return () => {
+        window.speechSynthesis.onvoiceschanged = null;
+        if (speechSynthesisRef.current) {
+          window.speechSynthesis.cancel();
+        }
+      };
+    }
+  }, [isBrowser]);
+
+  // Initialize Socket.IO connection - but only after confirming we're on the client
+  useEffect(() => {
+    if (!isBrowser) return;
+
+    const socket = io("http://localhost:8080", {
+      transports: ["websocket"],
+    });
+
+    socketRef.current = socket;
+
+    socket.on("connect", () => {
+      console.log("Connected to voice agent server");
       setError(null);
-    };
+    });
 
-    const onCallEnd = () => {
-      console.log("Call ended");
+    socket.on("disconnect", () => {
+      console.log("Disconnected from voice agent server");
       setCallStatus(CallStatus.FINISHED);
-    };
+    });
 
-    const onMessage = (message: VapiMessage) => {
-      console.log("Received message:", message);
-      try {
-        if (
-          message.type === "transcript" &&
-          message.transcriptType === "final" &&
-          message.role &&
-          message.transcript
-        ) {
-          const newMessage = {
-            role: message.role,
-            content: message.transcript,
-          };
+    socket.on("agent-message", (message: AgentMessage) => {
+      console.log("Received agent message:", message);
+      setCurrentMessage(message.text);
 
-          setMessages((prev) => [...prev, newMessage]);
-        }
-      } catch (err) {
-        console.error("Error processing message:", err);
-        setError(`Message processing error: ${err}`);
-      }
-    };
+      // Use Web Speech API for speech synthesis
+      speakText(message.text);
+    });
 
-    const onSpeechStart = () => {
-      console.log("Speech started");
-      setIsSpeaking(true);
-    };
+    socket.on("transcript-update", (message: TranscriptMessage) => {
+      console.log("Transcript update:", message);
+      setTranscript((prev) => [...prev, message]);
+    });
 
-    const onSpeechEnd = () => {
-      console.log("Speech ended");
-      setIsSpeaking(false);
-    };
+    socket.on("session-ended", (data) => {
+      console.log("Session ended:", data);
+      setTranscript(data.transcript);
+      setCallStatus(CallStatus.FINISHED);
+    });
 
-    const onError = (error: any) => {
-      console.error("VAPI Error Details:");
-      console.error("- Error object:", error);
-      console.error("- Error type:", typeof error);
-      console.error("- Error keys:", Object.keys(error || {}));
-      console.error("- Error message:", error?.message || "No message");
-      console.error("- Error stack:", error?.stack || "No stack");
-
-      // Handle VAPI specific error format
-      let errorMessage = "Unknown error occurred";
-
-      if (typeof error === "string") {
-        errorMessage = error;
-      } else if (error && typeof error === "object") {
-        // Handle VAPI error format with data/error keys
-        if (error.error && typeof error.error === "string") {
-          errorMessage = error.error;
-        } else if (error.data && error.data.message) {
-          errorMessage = error.data.message;
-        } else if (error.message) {
-          errorMessage = error.message;
-        } else if (error.statusCode) {
-          errorMessage = `API Error (${error.statusCode})`;
-
-          // Common VAPI status codes
-          switch (error.statusCode) {
-            case 401:
-              errorMessage += ": Invalid API key or unauthorized access";
-              break;
-            case 400:
-              errorMessage +=
-                ": Bad request - check your workflow ID and parameters";
-              break;
-            case 404:
-              errorMessage += ": Workflow not found - check your workflow ID";
-              break;
-            case 500:
-              errorMessage += ": Server error - please try again later";
-              break;
-          }
-        } else {
-          errorMessage = JSON.stringify(error);
-        }
-      }
-
-      setError(errorMessage);
+    socket.on("error", (error) => {
+      console.error("Socket error:", error);
+      setError(error.message || "Connection error occurred");
       setCallStatus(CallStatus.INACTIVE);
-    };
+    });
 
-    // Check if VAPI is properly initialized before setting up listeners
-    if (!vapi) {
-      console.error("VAPI is not initialized");
-      setError("VAPI SDK not initialized");
+    return () => {
+      socket.disconnect();
+    };
+  }, [isBrowser]);
+
+  // Handle call end and feedback generation
+  useEffect(() => {
+    if (!isBrowser) return;
+
+    if (callStatus === CallStatus.FINISHED && transcript.length > 0) {
+      if (type === "generate") {
+        router.push(`/interview/${interviewId}`);
+      } else {
+        handleGenerateFeedback();
+      }
+    }
+  }, [callStatus, transcript, type, interviewId, isBrowser, router]);
+
+  // Function to handle text-to-speech using Web Speech API
+  const speakText = (text: string) => {
+    if (!isBrowser || !window.speechSynthesis) {
+      console.error("Speech synthesis not supported");
       return;
     }
 
-    vapi.on("call-start", onCallStart);
-    vapi.on("call-end", onCallEnd);
-    vapi.on("message", onMessage);
-    vapi.on("speech-start", onSpeechStart);
-    vapi.on("speech-end", onSpeechEnd);
-    vapi.on("error", onError);
+    // Cancel any ongoing speech
+    window.speechSynthesis.cancel();
 
-    return () => {
-      vapi.off("call-start", onCallStart);
-      vapi.off("call-end", onCallEnd);
-      vapi.off("message", onMessage);
-      vapi.off("speech-start", onSpeechStart);
-      vapi.off("speech-end", onSpeechEnd);
-      vapi.off("error", onError);
-    };
-  }, []);
+    // Create new utterance
+    const utterance = new SpeechSynthesisUtterance(text);
 
-  // TODO: Implement feedback generation logic
-  const handleGenerateFeedback = async (messages: SavedMessage[]) => {
-    console.log("Generating feedback with messages:", messages);
-    const { success, id } = {
-      success: true,
-      id: "feedback-id-123", // Mocked feedback ID for demonstration
+    // Set selected voice if available
+    if (selectedVoice) {
+      utterance.voice = selectedVoice;
+    }
+
+    // Settings
+    utterance.rate = 1.0; // Speech rate
+    utterance.pitch = 1.0; // Speech pitch
+    utterance.volume = 1.0; // Volume
+
+    // Event handlers
+    utterance.onstart = () => {
+      setIsAgentSpeaking(true);
+      setIsSpeaking(true);
     };
 
-    if (success && id) {
-      console.log("Feedback generated successfully with ID:", id);
-      router.push(`/interview/${interviewId}/feedback`);
-    } else {
-      console.error("Failed to generate feedback");
+    utterance.onend = () => {
+      setIsAgentSpeaking(false);
+      setIsSpeaking(false);
+    };
+
+    utterance.onerror = (event) => {
+      console.error("Speech synthesis error:", event);
+      setIsAgentSpeaking(false);
+      setIsSpeaking(false);
+    };
+
+    // Save reference to current utterance
+    speechSynthesisRef.current = utterance;
+
+    // Start speaking
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const handleGenerateFeedback = async () => {
+    if (!interviewId || transcript.length === 0) {
+      console.error("Missing interview ID or transcript");
+      setError("Cannot generate feedback: missing data");
+      return;
+    }
+
+    try {
+      const { success, message, feedbackId } = await createFeedback({
+        interviewId: interviewId,
+        userId: userId,
+        transcript: transcript,
+      });
+
+      if (success && feedbackId) {
+        router.push(`/interview/${interviewId}/feedback`);
+      } else {
+        console.error("Failed to generate feedback:", message);
+        setError("Failed to generate feedback");
+        router.push(`/interview/${interviewId}`);
+      }
+    } catch (error) {
+      console.error("Error generating feedback:", error);
       setError("Failed to generate feedback");
       router.push(`/interview/${interviewId}`);
     }
   };
 
-  useEffect(() => {
-    if (callStatus === CallStatus.FINISHED) {
-      if (type === "generate") {
-        console.log("Call finished - redirecting to interview page");
-        router.push(`/interview/${interviewId}`);
-      } else {
-        handleGenerateFeedback(messages);
-      }
-    }
-  }, [messages, callStatus, type, userId, router]);
+  const initializeMediaRecorder = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          sampleRate: 16000,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      });
 
-  const handleCall = async () => {
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: "audio/webm",
+      });
+
+      mediaRecorderRef.current = mediaRecorder;
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      // Fix for the recursive call that causes stack overflow
+      mediaRecorder.onstop = async () => {
+        // Create a copy of the audio chunks and clear the original array immediately
+        // This prevents recursion by ensuring we're working with a fixed set of chunks
+        const currentAudioChunks = [...audioChunksRef.current];
+        audioChunksRef.current = [];
+
+        // Process the audio data if we have chunks
+        if (currentAudioChunks.length > 0) {
+          // Create a blob from the copied chunks
+          const audioBlob = new Blob(currentAudioChunks, {
+            type: "audio/webm",
+          });
+
+          try {
+            // Convert to base64 and send to server
+            const arrayBuffer = await audioBlob.arrayBuffer();
+            const base64Audio = btoa(
+              String.fromCharCode(...new Uint8Array(arrayBuffer))
+            );
+
+            if (socketRef.current) {
+              socketRef.current.emit("audio-chunk", base64Audio);
+            }
+          } catch (error) {
+            console.error("Error processing audio:", error);
+            setError("Failed to process audio");
+          }
+        }
+      };
+
+      return true;
+    } catch (error) {
+      console.error("Error initializing media recorder:", error);
+      setError("Microphone access denied or unavailable");
+      return false;
+    }
+  };
+
+  const startCall = async () => {
     try {
       setCallStatus(CallStatus.CONNECTING);
       setError(null);
 
-      console.log("Starting call with config:");
-      console.log("- Type:", type);
-      console.log("- Workflow ID:", process.env.NEXT_PUBLIC_VAPI_WORKFLOW_ID);
-      console.log("- Variables:", { username: userName, userid: userId });
-      console.log("- Provider:", provider);
-      console.log("- Model:", model);
-
-      // Validate VAPI SDK
-      if (!vapi) {
-        throw new Error("VAPI SDK is not initialized");
+      // Initialize media recorder
+      const mediaInitialized = await initializeMediaRecorder();
+      if (!mediaInitialized) {
+        setCallStatus(CallStatus.INACTIVE);
+        console.log("Media recorder initialization failed");
+        return;
       }
 
-      if (typeof vapi.start !== "function") {
-        throw new Error("VAPI SDK start method is not available");
-      }
+      // Start session with voice agent
+      if (socketRef.current) {
+        socketRef.current.emit("start-session", {
+          userId,
+          userName,
+          type,
+          questions,
+          interviewId,
+          role,
+          level,
+          techStack,
+          focus,
+        });
 
-      // Validate user data
-      if (!userName || !userId) {
-        throw new Error("Username and userId are required");
-      }
+        setCallStatus(CallStatus.ACTIVE);
+        setIsRecording(true);
 
-      if (type === "generate") {
-        // Validate environment variables for workflow
-        if (!process.env.NEXT_PUBLIC_VAPI_WORKFLOW_ID) {
-          throw new Error(
-            "NEXT_PUBLIC_VAPI_WORKFLOW_ID is not defined in environment variables"
-          );
+        // Start continuous recording
+        if (mediaRecorderRef.current) {
+          mediaRecorderRef.current.start(1000); // Record in 1-second chunks
         }
-
-        // Use workflow mode - explicitly pass undefined for assistant
-        const result = await vapi.start(
-          undefined, // assistant - explicitly undefined
-          undefined, // assistantOverrides
-          undefined, // serverUrl
-          process.env.NEXT_PUBLIC_VAPI_WORKFLOW_ID, // workflowId
-          {
-            variableValues: {
-              username: userName,
-              userid: userId,
-            },
-          }
-        );
-
-        console.log("VAPI start result (workflow mode):", result);
-      } else {
-        // Use assistant mode with questions
-        let formattedQuestions = "";
-        if (questions) {
-          formattedQuestions = questions
-            .map((question) => `- ${question}`)
-            .join("\n");
-        }
-
-        await vapi.start(
-          interviewer, // assistant
-          {
-            variableValues: {
-              questions: formattedQuestions,
-            },
-          }
-        );
       }
-    } catch (error: any) {
-      console.error("Failed to start call - detailed error:");
-      console.error("- Error:", error);
-      console.error("- Error message:", error?.message);
-      console.error("- Error stack:", error?.stack);
-
-      const errorMessage =
-        error?.message || error?.toString() || "Unknown error starting call";
-      setError(errorMessage);
+    } catch (error) {
+      console.error("Error starting call:", error);
+      setError("Failed to start voice session");
       setCallStatus(CallStatus.INACTIVE);
     }
   };
 
-  const handleDisconnect = async () => {
+  const endCall = async () => {
     try {
-      console.log("Disconnecting call");
-      setCallStatus(CallStatus.FINISHED);
+      // Stop speech synthesis if in progress
+      if (isBrowser && window.speechSynthesis && speechSynthesisRef.current) {
+        window.speechSynthesis.cancel();
+      }
 
-      if (vapi && typeof vapi.stop === "function") {
-        vapi.stop();
+      setCallStatus(CallStatus.FINISHED);
+      setIsRecording(false);
+      setIsAgentSpeaking(false);
+      setIsSpeaking(false);
+
+      // Stop recording
+      if (
+        mediaRecorderRef.current &&
+        mediaRecorderRef.current.state === "recording"
+      ) {
+        mediaRecorderRef.current.stop();
+      }
+
+      // Stop media stream
+      if (mediaRecorderRef.current && mediaRecorderRef.current.stream) {
+        mediaRecorderRef.current.stream
+          .getTracks()
+          .forEach((track) => track.stop());
+      }
+
+      // End session
+      if (socketRef.current) {
+        socketRef.current.emit("end-session");
       }
     } catch (error) {
-      console.error("Error disconnecting:", error);
+      console.error("Error ending call:", error);
     }
   };
 
-  const latestMessage = messages[messages.length - 1]?.content;
+  const toggleRecording = () => {
+    if (!mediaRecorderRef.current || callStatus !== CallStatus.ACTIVE) return;
+
+    if (isRecording && mediaRecorderRef.current.state === "recording") {
+      mediaRecorderRef.current.pause();
+      setIsRecording(false);
+    } else if (!isRecording && mediaRecorderRef.current.state === "paused") {
+      mediaRecorderRef.current.resume();
+      setIsRecording(true);
+    }
+  };
+
+  // Function to stop speaking
+  const stopSpeaking = () => {
+    if (isBrowser && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+      setIsAgentSpeaking(false);
+      setIsSpeaking(false);
+    }
+  };
+
+  const latestMessage =
+    transcript[transcript.length - 1]?.content || currentMessage;
   const isCallInactiveOrFinished =
     callStatus === CallStatus.INACTIVE || callStatus === CallStatus.FINISHED;
 
@@ -317,14 +436,16 @@ const Agent = ({
           <div className="avatar">
             <Image
               src="/ai-avatar.png"
-              alt="vapi agent"
+              alt="Local AI agent"
               width={65}
               height={54}
               className="object-cover"
             />
-            {isSpeaking && <span className="animate-speak"></span>}
+            {(isSpeaking || isAgentSpeaking) && (
+              <span className="animate-speak"></span>
+            )}
           </div>
-          <h3>AI Interviewer</h3>
+          <h3>AI Interviewer (Web Speech)</h3>
         </div>
         <div className="card-border">
           <div className="card-content">
@@ -340,6 +461,37 @@ const Agent = ({
         </div>
       </div>
 
+      {/* Voice Selection - Only show on client side after hydration */}
+      {isBrowser && voices.length > 0 && callStatus === CallStatus.INACTIVE && (
+        <div className="voice-selection mb-4 p-3 rounded-lg border">
+          <label
+            htmlFor="voice-select"
+            className="font-medium text-sm block mb-1"
+          >
+            Select Voice:
+          </label>
+          <select
+            id="voice-select"
+            className="w-full p-2 border rounded"
+            value={selectedVoice?.name || ""}
+            onChange={(e) => {
+              const selectedVoice = voices.find(
+                (voice) => voice.name === e.target.value
+              );
+              setSelectedVoice(selectedVoice || null);
+            }}
+          >
+            {voices
+              .filter((voice) => voice.lang.includes("en"))
+              .map((voice) => (
+                <option key={voice.name} value={voice.name}>
+                  {voice.name} ({voice.lang})
+                </option>
+              ))}
+          </select>
+        </div>
+      )}
+
       {/* Error Display */}
       {error && (
         <div className="error-border mb-4">
@@ -350,27 +502,52 @@ const Agent = ({
         </div>
       )}
 
-      {/* Call Status Debug Info */}
-      <div className="debug-info mb-4 p-2 bg-gray-100 rounded text-sm">
-        <p>
-          <strong>Call Status:</strong> {callStatus}
-        </p>
-        <p>
-          <strong>Messages Count:</strong> {messages.length}
-        </p>
-        <p>
-          <strong>Is Speaking:</strong> {isSpeaking ? "Yes" : "No"}
-        </p>
+      {/* Status Display */}
+      <div className="status-info mb-4 p-3 rounded-lg border">
+        <div className="flex justify-between items-center text-sm">
+          <span>
+            <strong>Status:</strong> {callStatus}
+          </span>
+          <span>
+            <strong>Recording:</strong> {isRecording ? "🎤 ON" : "🎤 OFF"}
+          </span>
+          <span>
+            <strong>Messages:</strong> {transcript.length}
+          </span>
+        </div>
+        {callStatus === CallStatus.ACTIVE && (
+          <div className="mt-2 flex gap-2">
+            <button
+              onClick={toggleRecording}
+              className={cn(
+                "px-3 py-1 rounded text-xs",
+                isRecording
+                  ? "bg-red-100 text-red-700 hover:bg-red-200"
+                  : "bg-green-100 text-green-700 hover:bg-green-200"
+              )}
+            >
+              {isRecording ? "Pause" : "Resume"}
+            </button>
+            {isAgentSpeaking && (
+              <button
+                onClick={stopSpeaking}
+                className="px-3 py-1 rounded text-xs bg-yellow-100 text-yellow-700 hover:bg-yellow-200"
+              >
+                Stop Speaking
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
-      {messages.length > 0 && (
+      {/* Current Message Display */}
+      {latestMessage && (
         <div className="transcript-border">
           <div className="transcript">
             <p
-              key={latestMessage}
               className={cn(
-                "transition-opacity duration-500 opacity-0",
-                "animate-fadeIn opacity-100"
+                "transition-opacity duration-500",
+                currentMessage ? "opacity-100" : "opacity-70"
               )}
             >
               {latestMessage}
@@ -379,25 +556,100 @@ const Agent = ({
         </div>
       )}
 
-      <div className="w-full flex justify-center">
-        {callStatus !== "ACTIVE" ? (
-          <button className="relative btn-call" onClick={handleCall}>
+      {/* Transcript History */}
+      {transcript.length > 1 && (
+        <div className="transcript-history mt-4 max-h-40 overflow-y-auto p-3 rounded">
+          <h4 className="text-sm font-semibold mb-2">Conversation History:</h4>
+          {transcript.slice(0, -1).map((msg, index) => (
+            <div
+              key={index}
+              className={cn(
+                "text-xs mb-1 p-1 rounded",
+                msg.role === "user"
+                  ? "bg-blue-100 text-blue-800"
+                  : "bg-green-100 text-green-800"
+              )}
+            >
+              <strong>{msg.role === "user" ? "You" : "AI"}:</strong>{" "}
+              {msg.content}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Call Controls */}
+      <div className="w-full flex justify-center mt-6">
+        {callStatus !== CallStatus.ACTIVE ? (
+          <button
+            className="relative btn-call"
+            onClick={startCall}
+            disabled={callStatus === CallStatus.CONNECTING}
+          >
             <span
               className={cn(
                 "absolute animate-ping rounded-full opacity-75",
-                callStatus !== "CONNECTING" && "hidden"
+                callStatus !== CallStatus.CONNECTING && "hidden"
               )}
             />
-            <span>{isCallInactiveOrFinished ? "Call" : " . . ."}</span>
+            <span>
+              {callStatus === CallStatus.CONNECTING
+                ? "Connecting..."
+                : isCallInactiveOrFinished
+                ? "Start Interview"
+                : "Please wait..."}
+            </span>
           </button>
         ) : (
-          <button className="btn-disconnect" onClick={handleDisconnect}>
-            End
+          <button className="btn-disconnect" onClick={endCall}>
+            End Interview
           </button>
         )}
       </div>
+
+      {/* Debug Information - Make sure this doesn't cause hydration issues */}
+      {process.env.NODE_ENV === "development" && (
+        <div className="debug-panel mt-4 p-2 rounded text-xs">
+          <details>
+            <summary className="cursor-pointer font-semibold">
+              Debug Info
+            </summary>
+            <div className="mt-2 space-y-1">
+              <p>
+                <strong>Socket Connected:</strong>{" "}
+                {/* Don't check socket during SSR */}
+                {isBrowser && socketRef.current?.connected ? "Yes" : "No"}
+              </p>
+              <p>
+                <strong>Media Recorder State:</strong>{" "}
+                {mediaRecorderRef.current?.state || "Not initialized"}
+              </p>
+              <p>
+                <strong>Agent Speaking:</strong>{" "}
+                {isAgentSpeaking ? "Yes" : "No"}
+              </p>
+              <p>
+                <strong>User Recording:</strong> {isRecording ? "Yes" : "No"}
+              </p>
+              <p>
+                <strong>Transcript Length:</strong> {transcript.length}
+              </p>
+              <p>
+                <strong>Selected Voice:</strong>{" "}
+                {selectedVoice
+                  ? `${selectedVoice.name} (${selectedVoice.lang})`
+                  : "Default"}
+              </p>
+              <p>
+                <strong>Web Speech API Support:</strong>{" "}
+                {/* Render the same value for server and client initially */}
+                {isBrowser && window.speechSynthesis ? "Yes" : "No"}
+              </p>
+            </div>
+          </details>
+        </div>
+      )}
     </>
   );
 };
 
-export default Agent;
+export default LocalVoiceAgent;
