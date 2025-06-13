@@ -1,171 +1,69 @@
 "use client";
 
-import React from "react";
 import Image from "next/image";
-import { cn } from "@/lib/utils";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+
+import { cn } from "@/lib/utils";
 import { vapi } from "@/lib/vapi.sdk";
-import { useEffect } from "react";
 import { interviewer } from "@/constants";
+import { createFeedback } from "@/lib/actions/general.action";
 
 enum CallStatus {
   INACTIVE = "INACTIVE",
-  ACTIVE = "ACTIVE",
   CONNECTING = "CONNECTING",
+  ACTIVE = "ACTIVE",
   FINISHED = "FINISHED",
 }
 
 interface SavedMessage {
-  role: "user" | "assistant" | "system";
+  role: "user" | "system" | "assistant";
   content: string;
-}
-
-interface VapiMessage {
-  type: string;
-  transcriptType?: string;
-  role?: "user" | "assistant" | "system";
-  transcript?: string;
-}
-
-interface AgentProps {
-  userName: string;
-  userId: string;
-  type: string;
-  interviewId?: string; // Optional for interview mode
-  questions?: string[]; // Optional for interview mode
-  provider?: string; // Add provider option
-  model?: string; // Add model option
 }
 
 const Agent = ({
   userName,
   userId,
-  type,
   interviewId,
+  feedbackId,
+  type,
   questions,
-  provider = "deepseek",
-  model = "deepseek-v3",
 }: AgentProps) => {
   const router = useRouter();
-
-  const [isSpeaking, setIsSpeaking] = React.useState(false);
-  const [callStatus, setCallStatus] = React.useState<CallStatus>(
-    CallStatus.INACTIVE
-  );
-  const [messages, setMessages] = React.useState<SavedMessage[]>([]);
-  const [error, setError] = React.useState<string | null>(null);
-
-  // Debug function to check VAPI configuration
-  const debugVapiConfig = () => {
-    console.log("VAPI Debug Info:");
-    console.log("- VAPI object:", vapi);
-    console.log("- Workflow ID:", process.env.NEXT_PUBLIC_VAPI_WORKFLOW_ID);
-    console.log("- VAPI methods:", Object.keys(vapi || {}));
-    console.log("- User info:", { userName, userId, type });
-  };
+  const [callStatus, setCallStatus] = useState<CallStatus>(CallStatus.INACTIVE);
+  const [messages, setMessages] = useState<SavedMessage[]>([]);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [lastMessage, setLastMessage] = useState<string>("");
 
   useEffect(() => {
-    // Debug VAPI configuration on component mount
-    debugVapiConfig();
-
     const onCallStart = () => {
-      console.log("Call started successfully");
       setCallStatus(CallStatus.ACTIVE);
-      setError(null);
     };
 
     const onCallEnd = () => {
-      console.log("Call ended");
       setCallStatus(CallStatus.FINISHED);
     };
 
-    const onMessage = (message: VapiMessage) => {
-      console.log("Received message:", message);
-      try {
-        if (
-          message.type === "transcript" &&
-          message.transcriptType === "final" &&
-          message.role &&
-          message.transcript
-        ) {
-          const newMessage = {
-            role: message.role,
-            content: message.transcript,
-          };
-
-          setMessages((prev) => [...prev, newMessage]);
-        }
-      } catch (err) {
-        console.error("Error processing message:", err);
-        setError(`Message processing error: ${err}`);
+    const onMessage = (message: Message) => {
+      if (message.type === "transcript" && message.transcriptType === "final") {
+        const newMessage = { role: message.role, content: message.transcript };
+        setMessages((prev) => [...prev, newMessage]);
       }
     };
 
     const onSpeechStart = () => {
-      console.log("Speech started");
+      console.log("speech start");
       setIsSpeaking(true);
     };
 
     const onSpeechEnd = () => {
-      console.log("Speech ended");
+      console.log("speech end");
       setIsSpeaking(false);
     };
 
-    const onError = (error: any) => {
-      console.error("VAPI Error Details:");
-      console.error("- Error object:", error);
-      console.error("- Error type:", typeof error);
-      console.error("- Error keys:", Object.keys(error || {}));
-      console.error("- Error message:", error?.message || "No message");
-      console.error("- Error stack:", error?.stack || "No stack");
-
-      // Handle VAPI specific error format
-      let errorMessage = "Unknown error occurred";
-
-      if (typeof error === "string") {
-        errorMessage = error;
-      } else if (error && typeof error === "object") {
-        // Handle VAPI error format with data/error keys
-        if (error.error && typeof error.error === "string") {
-          errorMessage = error.error;
-        } else if (error.data && error.data.message) {
-          errorMessage = error.data.message;
-        } else if (error.message) {
-          errorMessage = error.message;
-        } else if (error.statusCode) {
-          errorMessage = `API Error (${error.statusCode})`;
-
-          // Common VAPI status codes
-          switch (error.statusCode) {
-            case 401:
-              errorMessage += ": Invalid API key or unauthorized access";
-              break;
-            case 400:
-              errorMessage +=
-                ": Bad request - check your workflow ID and parameters";
-              break;
-            case 404:
-              errorMessage += ": Workflow not found - check your workflow ID";
-              break;
-            case 500:
-              errorMessage += ": Server error - please try again later";
-              break;
-          }
-        } else {
-          errorMessage = JSON.stringify(error);
-        }
-      }
-
-      setError(errorMessage);
-      setCallStatus(CallStatus.INACTIVE);
+    const onError = (error: Error) => {
+      console.log("Error:", error);
     };
-
-    // Check if VAPI is properly initialized before setting up listeners
-    if (!vapi) {
-      console.error("VAPI is not initialized");
-      setError("VAPI SDK not initialized");
-      return;
-    }
 
     vapi.on("call-start", onCallStart);
     vapi.on("call-end", onCallEnd);
@@ -184,196 +82,113 @@ const Agent = ({
     };
   }, []);
 
-  // TODO: Implement feedback generation logic
-  const handleGenerateFeedback = async (messages: SavedMessage[]) => {
-    console.log("Generating feedback with messages:", messages);
-    const { success, id } = {
-      success: true,
-      id: "feedback-id-123", // Mocked feedback ID for demonstration
+  useEffect(() => {
+    if (messages.length > 0) {
+      setLastMessage(messages[messages.length - 1].content);
+    }
+
+    const handleGenerateFeedback = async (messages: SavedMessage[]) => {
+      console.log("handleGenerateFeedback");
+
+      const { success, feedbackId: id } = await createFeedback({
+        interviewId: interviewId!,
+        userId: userId!,
+        transcript: messages,
+        feedbackId,
+      });
+
+      if (success && id) {
+        router.push(`/interview/${interviewId}/feedback`);
+      } else {
+        console.log("Error saving feedback");
+        router.push("/");
+      }
     };
 
-    if (success && id) {
-      console.log("Feedback generated successfully with ID:", id);
-      router.push(`/interview/${interviewId}/feedback`);
-    } else {
-      console.error("Failed to generate feedback");
-      setError("Failed to generate feedback");
-      router.push(`/interview/${interviewId}`);
-    }
-  };
-
-  useEffect(() => {
     if (callStatus === CallStatus.FINISHED) {
       if (type === "generate") {
-        console.log("Call finished - redirecting to interview page");
-        router.push(`/interview/${interviewId}`);
+        router.push("/");
       } else {
         handleGenerateFeedback(messages);
       }
     }
-  }, [messages, callStatus, type, userId, router]);
+  }, [messages, callStatus, feedbackId, interviewId, router, type, userId]);
 
   const handleCall = async () => {
-    try {
-      setCallStatus(CallStatus.CONNECTING);
-      setError(null);
+    setCallStatus(CallStatus.CONNECTING);
 
-      console.log("Starting call with config:");
-      console.log("- Type:", type);
-      console.log("- Workflow ID:", process.env.NEXT_PUBLIC_VAPI_WORKFLOW_ID);
-      console.log("- Variables:", { username: userName, userid: userId });
-      console.log("- Provider:", provider);
-      console.log("- Model:", model);
-
-      // Validate VAPI SDK
-      if (!vapi) {
-        throw new Error("VAPI SDK is not initialized");
+    if (type === "generate") {
+      await vapi.start(process.env.NEXT_PUBLIC_VAPI_WORKFLOW_ID!, {
+        variableValues: {
+          username: userName,
+          userid: userId,
+        },
+      });
+    } else {
+      let formattedQuestions = "";
+      if (questions) {
+        formattedQuestions = questions
+          .map((question) => `- ${question}`)
+          .join("\n");
       }
 
-      if (typeof vapi.start !== "function") {
-        throw new Error("VAPI SDK start method is not available");
-      }
-
-      // Validate user data
-      if (!userName || !userId) {
-        throw new Error("Username and userId are required");
-      }
-
-      if (type === "generate") {
-        // Validate environment variables for workflow
-        if (!process.env.NEXT_PUBLIC_VAPI_WORKFLOW_ID) {
-          throw new Error(
-            "NEXT_PUBLIC_VAPI_WORKFLOW_ID is not defined in environment variables"
-          );
-        }
-
-        // Use workflow mode - explicitly pass undefined for assistant
-        const result = await vapi.start(
-          undefined, // assistant - explicitly undefined
-          undefined, // assistantOverrides
-          undefined, // serverUrl
-          process.env.NEXT_PUBLIC_VAPI_WORKFLOW_ID, // workflowId
-          {
-            variableValues: {
-              username: userName,
-              userid: userId,
-            },
-          }
-        );
-
-        console.log("VAPI start result (workflow mode):", result);
-      } else {
-        // Use assistant mode with questions
-        let formattedQuestions = "";
-        if (questions) {
-          formattedQuestions = questions
-            .map((question) => `- ${question}`)
-            .join("\n");
-        }
-
-        await vapi.start(
-          interviewer, // assistant
-          {
-            variableValues: {
-              questions: formattedQuestions,
-            },
-          }
-        );
-      }
-    } catch (error: any) {
-      console.error("Failed to start call - detailed error:");
-      console.error("- Error:", error);
-      console.error("- Error message:", error?.message);
-      console.error("- Error stack:", error?.stack);
-
-      const errorMessage =
-        error?.message || error?.toString() || "Unknown error starting call";
-      setError(errorMessage);
-      setCallStatus(CallStatus.INACTIVE);
+      await vapi.start(interviewer, {
+        variableValues: {
+          questions: formattedQuestions,
+        },
+      });
     }
   };
 
-  const handleDisconnect = async () => {
-    try {
-      console.log("Disconnecting call");
-      setCallStatus(CallStatus.FINISHED);
-
-      if (vapi && typeof vapi.stop === "function") {
-        vapi.stop();
-      }
-    } catch (error) {
-      console.error("Error disconnecting:", error);
-    }
+  const handleDisconnect = () => {
+    setCallStatus(CallStatus.FINISHED);
+    vapi.stop();
   };
-
-  const latestMessage = messages[messages.length - 1]?.content;
-  const isCallInactiveOrFinished =
-    callStatus === CallStatus.INACTIVE || callStatus === CallStatus.FINISHED;
 
   return (
     <>
       <div className="call-view">
+        {/* AI Interviewer Card */}
         <div className="card-interviewer">
           <div className="avatar">
             <Image
               src="/ai-avatar.png"
-              alt="vapi agent"
+              alt="profile-image"
               width={65}
               height={54}
               className="object-cover"
             />
-            {isSpeaking && <span className="animate-speak"></span>}
+            {isSpeaking && <span className="animate-speak" />}
           </div>
           <h3>AI Interviewer</h3>
         </div>
+
+        {/* User Profile Card */}
         <div className="card-border">
           <div className="card-content">
             <Image
               src="/user-avatar.png"
-              alt="user avatar"
-              width={540}
-              height={540}
+              alt="profile-image"
+              width={539}
+              height={539}
               className="rounded-full object-cover size-[120px]"
             />
-            {userName}
+            <h3>{userName}</h3>
           </div>
         </div>
-      </div>
-
-      {/* Error Display */}
-      {error && (
-        <div className="error-border mb-4">
-          <div className="error-content bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
-            <p className="font-bold">Error:</p>
-            <p>{error}</p>
-          </div>
-        </div>
-      )}
-
-      {/* Call Status Debug Info */}
-      <div className="debug-info mb-4 p-2 bg-gray-100 rounded text-sm">
-        <p>
-          <strong>Call Status:</strong> {callStatus}
-        </p>
-        <p>
-          <strong>Messages Count:</strong> {messages.length}
-        </p>
-        <p>
-          <strong>Is Speaking:</strong> {isSpeaking ? "Yes" : "No"}
-        </p>
       </div>
 
       {messages.length > 0 && (
         <div className="transcript-border">
           <div className="transcript">
             <p
-              key={latestMessage}
+              key={lastMessage}
               className={cn(
                 "transition-opacity duration-500 opacity-0",
                 "animate-fadeIn opacity-100"
               )}
             >
-              {latestMessage}
+              {lastMessage}
             </p>
           </div>
         </div>
@@ -381,17 +196,22 @@ const Agent = ({
 
       <div className="w-full flex justify-center">
         {callStatus !== "ACTIVE" ? (
-          <button className="relative btn-call" onClick={handleCall}>
+          <button className="relative btn-call" onClick={() => handleCall()}>
             <span
               className={cn(
                 "absolute animate-ping rounded-full opacity-75",
                 callStatus !== "CONNECTING" && "hidden"
               )}
             />
-            <span>{isCallInactiveOrFinished ? "Call" : " . . ."}</span>
+
+            <span className="relative">
+              {callStatus === "INACTIVE" || callStatus === "FINISHED"
+                ? "Call"
+                : ". . ."}
+            </span>
           </button>
         ) : (
-          <button className="btn-disconnect" onClick={handleDisconnect}>
+          <button className="btn-disconnect" onClick={() => handleDisconnect()}>
             End
           </button>
         )}
